@@ -34,10 +34,14 @@ function request(path, options = {}) {
           headers: res.headers,
           body,
           text: () => body.toString('utf8'),
+          json: () => JSON.parse(body.toString('utf8')),
         });
       });
     });
     req.on('error', reject);
+    if (options.body) {
+      req.write(options.body);
+    }
     req.end();
   });
 }
@@ -133,6 +137,12 @@ test('SPA fallback: GET /camps/12/leaderboard serves index.html', async () => {
   assert.match(res.headers['content-type'], /text\/html/);
 });
 
+test('SPA fallback: GET /explore/1/team/2 serves index.html', async () => {
+  const res = await request('/explore/1/team/2');
+  assert.strictEqual(res.statusCode, 200);
+  assert.match(res.headers['content-type'], /text\/html/);
+});
+
 test('Non-existent asset returns 404', async () => {
   const res = await request('/assets/nonexistent-file.png');
   assert.strictEqual(res.statusCode, 404);
@@ -146,7 +156,106 @@ test('Gzip compression is applied when requested', async () => {
   assert.strictEqual(res.headers['content-encoding'], 'gzip');
 });
 
-test('Unsupported HTTP methods return 405', async () => {
+test('Unsupported HTTP methods on static content return 405', async () => {
   const res = await request('/', { method: 'POST' });
   assert.strictEqual(res.statusCode, 405);
+});
+
+test('Directory traversal attempts return 403', async () => {
+  const res = await request('/..%2f..%2fetc/passwd');
+  assert.strictEqual(res.statusCode, 403);
+});
+
+test('API proxy: GET /landing-categories/ returns live backend JSON', async () => {
+  const res = await request('/landing-categories/');
+  assert.strictEqual(res.statusCode, 200);
+  assert.match(res.headers['content-type'], /application\/json/);
+  const data = res.json();
+  assert.ok(Array.isArray(data));
+  assert.ok(data.length > 0);
+  assert.ok(data[0].id !== undefined);
+});
+
+test('API proxy: GET /camps/list/ returns live camp records', async () => {
+  const res = await request('/camps/list/');
+  assert.strictEqual(res.statusCode, 200);
+  assert.match(res.headers['content-type'], /application\/json/);
+  const data = res.json();
+  assert.ok(Array.isArray(data));
+  assert.ok(data.length > 0);
+  assert.ok(data[0].name.includes('Financopedia'));
+});
+
+test('API proxy: GET /users/public-team/ returns team data', async () => {
+  const res = await request('/users/public-team/');
+  assert.strictEqual(res.statusCode, 200);
+  assert.match(res.headers['content-type'], /application\/json/);
+  const data = res.json();
+  assert.ok(Array.isArray(data));
+  assert.ok(data.length > 0);
+});
+
+test('API proxy: GET /users/top/ returns leaderboard rankings', async () => {
+  const res = await request('/users/top/');
+  assert.strictEqual(res.statusCode, 200);
+  assert.match(res.headers['content-type'], /application\/json/);
+  const data = res.json();
+  assert.ok(data.results && Array.isArray(data.results));
+});
+
+test('Media proxy: GET /media/uploads/... streams image from upstream', async () => {
+  const res = await request('/media/uploads/25ba3073-efc3-40a0-8589-d3269afe5e7b.jpg');
+  assert.strictEqual(res.statusCode, 200);
+  assert.match(res.headers['content-type'], /image\/jpeg/);
+  assert.ok(res.body.length > 1000);
+});
+
+test('API proxy: POST /auth/login/ forwards request body to upstream', async () => {
+  const body = JSON.stringify({ phone_number: '+998901234567', password: 'bad_password' });
+  const res = await request('/auth/login/', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body),
+    },
+    body,
+  });
+  // Upstream rejects invalid credentials with 401 (not 405 Method Not Allowed)
+  assert.strictEqual(res.statusCode, 401);
+  const data = res.json();
+  assert.ok(data.error !== undefined);
+});
+
+test('API proxy: returns 502 Bad Gateway when upstream is unreachable', async () => {
+  const badServer = createServer({ apiTarget: 'http://127.0.0.1:59999' });
+  let badPort;
+  await new Promise((resolve) => {
+    badServer.listen(0, '127.0.0.1', () => {
+      badPort = badServer.address().port;
+      resolve();
+    });
+  });
+
+  try {
+    const res = await new Promise((resolve, reject) => {
+      const req = http.request(`http://127.0.0.1:${badPort}/landing-categories/`, (r) => {
+        const chunks = [];
+        r.on('data', (c) => chunks.push(c));
+        r.on('end', () => {
+          resolve({
+            statusCode: r.statusCode,
+            json: () => JSON.parse(Buffer.concat(chunks).toString('utf8')),
+          });
+        });
+      });
+      req.on('error', reject);
+      req.end();
+    });
+
+    assert.strictEqual(res.statusCode, 502);
+    const data = res.json();
+    assert.strictEqual(data.error, 'Bad Gateway');
+  } finally {
+    await new Promise((resolve) => badServer.close(resolve));
+  }
 });
