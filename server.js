@@ -154,7 +154,7 @@ export function createServer(options = {}) {
 
     // Prevent directory traversal
     const rel = path.relative(publicDir, safePath);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    if (decodedPath.includes('..') || rel.startsWith('..') || path.isAbsolute(rel)) {
       res.writeHead(403, { 'Content-Type': 'text/plain' });
       return res.end('Forbidden');
     }
