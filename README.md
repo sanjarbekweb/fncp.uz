@@ -28,8 +28,9 @@ Financopedia is an event management and statistics web application connecting or
   - `/roles`, `/roles/create`, `/roles/edit/:id`
 - **Legal & Compliance**:
   - `/privacy-policy` & `/terms-of-service`
-- **Backend API Integration**:
-  - Communicates directly with the Financopedia API endpoint (`https://api.fncp.uz`).
+- **Backend API & Media Proxying**:
+  - Automatically proxies API requests (`/auth/*`, `/camps/*`, `/users/*`, `/landing-categories/*`, `/event/*`, `/referral/*`, etc.) and uploads (`/media/*`) to `https://api.fncp.uz` (configurable via `API_TARGET`).
+  - Allows full dynamic rendering and interaction on `localhost` without CORS or missing asset issues.
 
 ---
 
@@ -85,14 +86,14 @@ fncp.uz/
 Run with the zero-dependency Node server:
 
 ```bash
-# Start server (default: http://localhost:3000)
+# Start server with live API proxying (default: http://localhost:3000)
 npm start
 
-# Or with custom port
-PORT=8080 npm start
+# Or with custom port and custom backend
+PORT=8080 API_TARGET=https://api.fncp.uz npm start
 ```
 
-Or using Vite:
+Or using Vite (includes automatic dev server proxy):
 
 ```bash
 npx vite
@@ -100,7 +101,7 @@ npx vite
 
 ### Running Tests
 
-Run the built-in Node.js test suite covering all routes, assets, MIME types, gzip compression, and SPA fallbacks:
+Run the built-in Node.js test suite covering all routes, assets, MIME types, gzip compression, SPA fallbacks, live API proxying, media streaming, and directory traversal security:
 
 ```bash
 npm test
