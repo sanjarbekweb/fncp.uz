@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
@@ -6,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const PUBLIC_DIR = __dirname;
+const PUBLIC_DIR = path.resolve(__dirname);
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -39,16 +40,94 @@ const COMPRESSIBLE_EXTS = new Set([
   '.xml',
 ]);
 
+const API_PREFIXES = [
+  '/auth/',
+  '/me/',
+  '/users/',
+  '/landing-categories/',
+  '/referral/',
+  '/role/',
+  '/permission/',
+  '/event/',
+  '/dashboard/',
+  '/resources/',
+  '/camps/',
+  '/media/',
+  '/api/',
+];
+
+function isApiRoute(pathname, req) {
+  if (pathname.startsWith('/media/') || pathname.startsWith('/api/')) {
+    return true;
+  }
+  for (const prefix of API_PREFIXES) {
+    if (pathname.startsWith(prefix)) {
+      if (
+        pathname.endsWith('/') ||
+        (req.headers.accept && req.headers.accept.includes('application/json')) ||
+        req.headers['sec-fetch-dest'] === 'empty' ||
+        (req.method !== 'GET' && req.method !== 'HEAD')
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function proxyRequest(req, res, targetBaseUrl, targetPath) {
+  let upstreamUrl;
+  try {
+    upstreamUrl = new URL(targetPath, targetBaseUrl);
+  } catch (err) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: 'Bad Request', message: err.message }));
+  }
+
+  const transport = upstreamUrl.protocol === 'https:' ? https : http;
+  const headers = { ...req.headers };
+  headers.host = upstreamUrl.host;
+
+  const remoteIp = req.socket.remoteAddress;
+  if (remoteIp) {
+    headers['x-forwarded-for'] = headers['x-forwarded-for']
+      ? `${headers['x-forwarded-for']}, ${remoteIp}`
+      : remoteIp;
+  }
+  headers['x-forwarded-proto'] = req.socket.encrypted ? 'https' : 'http';
+
+  const clientReq = transport.request(
+    upstreamUrl,
+    {
+      method: req.method,
+      headers,
+    },
+    (upstreamRes) => {
+      res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+      upstreamRes.pipe(res);
+    }
+  );
+
+  clientReq.setTimeout(15000, () => {
+    clientReq.destroy(new Error('Gateway Timeout'));
+  });
+
+  clientReq.on('error', (err) => {
+    if (!res.headersSent) {
+      const isTimeout = err.message === 'Gateway Timeout';
+      res.writeHead(isTimeout ? 504 : 502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: isTimeout ? 'Gateway Timeout' : 'Bad Gateway', message: err.message }));
+    }
+  });
+
+  req.pipe(clientReq);
+}
+
 export function createServer(options = {}) {
-  const publicDir = options.publicDir || PUBLIC_DIR;
+  const publicDir = path.resolve(options.publicDir || PUBLIC_DIR);
+  const apiTarget = options.apiTarget || process.env.API_TARGET || 'https://api.fncp.uz';
 
   return http.createServer((req, res) => {
-    // Only accept GET and HEAD
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      res.writeHead(405, { 'Content-Type': 'text/plain' });
-      return res.end('Method Not Allowed');
-    }
-
     // Parse URL and strip query strings / hashes
     let parsedUrl;
     try {
@@ -59,15 +138,27 @@ export function createServer(options = {}) {
     }
 
     const decodedPath = decodeURIComponent(parsedUrl.pathname);
-    let safePath = path.normalize(path.join(publicDir, decodedPath));
+
+    // Proxy API and media requests to upstream
+    if (isApiRoute(decodedPath, req)) {
+      return proxyRequest(req, res, apiTarget, req.url);
+    }
+
+    // Only accept GET and HEAD for static / SPA content
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, { 'Content-Type': 'text/plain' });
+      return res.end('Method Not Allowed');
+    }
+
+    const safePath = path.resolve(publicDir, '.' + decodedPath);
 
     // Prevent directory traversal
-    if (!safePath.startsWith(publicDir)) {
+    const rel = path.relative(publicDir, safePath);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
       res.writeHead(403, { 'Content-Type': 'text/plain' });
       return res.end('Forbidden');
     }
 
-    let isSpaFallback = false;
     let filePath = safePath;
 
     // Check if target exists
@@ -91,7 +182,6 @@ export function createServer(options = {}) {
       filePath = path.join(publicDir, 'index.html');
       try {
         stats = fs.statSync(filePath);
-        isSpaFallback = true;
       } catch {
         res.writeHead(404, { 'Content-Type': 'text/plain' });
         return res.end('index.html not found');
