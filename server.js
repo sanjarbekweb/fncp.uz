@@ -228,9 +228,25 @@ export function createServer(options = {}) {
 
 // Start server if executed directly
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  const PORT = parseInt(process.env.PORT || '3000', 10);
-  const server = createServer();
-  server.listen(PORT, () => {
-    console.log(`Financopedia server running at http://localhost:${PORT}`);
-  });
+  const INITIAL_PORT = parseInt(process.env.PORT || '3000', 10);
+
+  function start(port) {
+    const server = createServer();
+
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE' && !process.env.PORT) {
+        console.warn(`Port ${port} is in use, trying port ${port + 1}...`);
+        start(port + 1);
+      } else {
+        console.error('Server error:', err);
+        process.exit(1);
+      }
+    });
+
+    server.listen(port, () => {
+      console.log(`Financopedia server running at http://localhost:${port}`);
+    });
+  }
+
+  start(INITIAL_PORT);
 }
